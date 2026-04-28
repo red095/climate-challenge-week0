@@ -25,4 +25,8 @@ jobs:
 
       - name: Check imports work
         run: |
-          python -c "import pandas; import numpy; import matplotlib; print('All imports OK')"
+          python -c "import pandas; import numpy; import matplotlib; import streamlit; import plotly; print('All imports OK')"
+
+      - name: Run tests
+        run: |
+          python -m unittest
