@@ -1,4 +1,3 @@
-cat > .gitignore << 'EOF'
 # Data files - never commit these
 data/
 *.csv
@@ -9,6 +8,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 .env
+.streamlit/secrets.toml
 venv/
 env/
 .venv/
@@ -23,4 +23,3 @@ env/
 # OS
 .DS_Store
 Thumbs.db
-EOF

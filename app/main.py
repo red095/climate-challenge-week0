@@ -1,18 +1,19 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
-import sys
 import os
 
-# Allow imports from project root
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from app.utils import (
-    load_all_countries, filter_data, monthly_avg, monthly_total,
-    extreme_heat_days, consecutive_dry_days, vulnerability_summary,
-    COLORS, COUNTRIES
-)
+try:
+    from app.utils import (
+        load_all_countries, filter_data, monthly_avg, monthly_total,
+        extreme_heat_days, consecutive_dry_days, vulnerability_summary,
+        google_drive_download_url, normalize_csv_source, COLORS, COUNTRIES
+    )
+except ModuleNotFoundError:
+    from utils import (
+        load_all_countries, filter_data, monthly_avg, monthly_total,
+        extreme_heat_days, consecutive_dry_days, vulnerability_summary,
+        google_drive_download_url, normalize_csv_source, COLORS, COUNTRIES
+    )
 
 # ── Page Config ──────────────────────────────────────────────
 st.set_page_config(
@@ -74,15 +75,58 @@ st.markdown("""
 """, unsafe_allow_html=True) 
 
 # ── Load Data ────────────────────────────────────────────────
-@st.cache_data
-def get_data():
-    return load_all_countries(data_dir='data')
+def get_remote_sources():
+    """Read optional Drive/URL CSV sources from Streamlit secrets or env vars."""
+    try:
+        google_drive = dict(st.secrets.get('google_drive', {}))
+    except Exception:
+        google_drive = {}
 
-df_all = get_data()
+    remote_sources = {}
+    for country in COUNTRIES:
+        key = country.lower()
+        env_prefix = country.upper()
+
+        file_id = (
+            google_drive.get(f'{key}_file_id') or
+            os.getenv(f'{env_prefix}_DRIVE_FILE_ID')
+        )
+        csv_url = (
+            google_drive.get(f'{key}_url') or
+            os.getenv(f'{env_prefix}_CSV_URL')
+        )
+
+        if file_id:
+            file_id = str(file_id).strip()
+            if file_id.startswith('http'):
+                remote_sources[country] = normalize_csv_source(file_id)
+            else:
+                remote_sources[country] = google_drive_download_url(file_id)
+        elif csv_url:
+            remote_sources[country] = normalize_csv_source(str(csv_url).strip())
+
+    return remote_sources
+
+
+@st.cache_data
+def get_data(remote_source_items=()):
+    remote_sources = dict(remote_source_items)
+    return load_all_countries(data_dir='data', remote_sources=remote_sources)
+
+remote_sources = get_remote_sources()
+df_all = get_data(tuple(sorted(remote_sources.items())))
 
 if df_all.empty:
-    st.error("⚠️ No data found. Please ensure cleaned CSV files are in the `data/` folder.")
+    st.error(
+        "No data found. Add cleaned CSV files to `data/`, or configure public "
+        "Google Drive file IDs in Streamlit secrets."
+    )
     st.stop()
+
+available_countries = [country for country in COUNTRIES
+                       if country in set(df_all['Country'])]
+missing_countries = [country for country in COUNTRIES
+                     if country not in available_countries]
 
 # ── Sidebar ──────────────────────────────────────────────────
 with st.sidebar:
@@ -94,8 +138,8 @@ with st.sidebar:
     # Country multi-select
     selected_countries = st.multiselect(
         "Select Countries",
-        options=COUNTRIES,
-        default=COUNTRIES,
+        options=available_countries,
+        default=available_countries,
         help="Choose one or more countries to display"
     )
 
@@ -131,11 +175,13 @@ with st.sidebar:
     st.markdown("""
     **About this Dashboard**  
     Historical climate data from NASA POWER  
-    Period: 2015 – 2026  
     Countries: Ethiopia, Kenya, Sudan, Tanzania, Nigeria  
     
     *Supporting Ethiopia's COP32 preparations*
     """)
+
+    if missing_countries:
+        st.warning(f"Missing data for: {', '.join(missing_countries)}")
 
 # ── Filter data ───────────────────────────────────────────────
 if not selected_countries:
@@ -171,7 +217,7 @@ st.markdown("---")
 # TAB LAYOUT
 # ════════════════════════════════════════════════════════════
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📈 Temperature Trends",
+    "📈 Variable Trends",
     "🌧️ Precipitation",
     "⚡ Extreme Events",
     "🔗 Correlations",
@@ -180,23 +226,36 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 
 # ── TAB 1: Temperature Trends ────────────────────────────────
 with tab1:
-    st.markdown('<p class="section-header">Monthly Temperature Trend</p>',
+    st.markdown('<p class="section-header">Monthly Climate Variable Trend</p>',
                 unsafe_allow_html=True)
 
-    # Use monthly avg for selected variable if it's temperature-related
-    if selected_var in ['T2M', 'T2M_MAX', 'T2M_MIN']:
-        plot_var = selected_var
-    else:
-        plot_var = 'T2M'
+    units = {
+        'T2M': '°C',
+        'T2M_MAX': '°C',
+        'T2M_MIN': '°C',
+        'PRECTOTCORR': 'mm/month',
+        'RH2M': '%',
+        'WS2M': 'm/s',
+        'QV2M': 'g/kg',
+    }
 
-    monthly = monthly_avg(df, plot_var)
+    if selected_var == 'PRECTOTCORR':
+        monthly = monthly_total(df, selected_var)
+        aggregation_label = 'Monthly Total'
+    else:
+        monthly = monthly_avg(df, selected_var)
+        aggregation_label = 'Monthly Average'
 
     fig = px.line(
         monthly, x='YearMonth', y='Value',
         color='Country',
         color_discrete_map=COLORS,
-        labels={'YearMonth': 'Date', 'Value': f'{plot_var} (°C)', 'Country': 'Country'},
-        title=f'Monthly Average {plot_var} — {year_range[0]}–{year_range[1]}'
+        labels={
+            'YearMonth': 'Date',
+            'Value': f'{selected_var} ({units.get(selected_var, "value")})',
+            'Country': 'Country'
+        },
+        title=f'{aggregation_label} {selected_var} — {year_range[0]}–{year_range[1]}'
     )
     fig.update_layout(
         height=420, hovermode='x unified',
@@ -208,19 +267,18 @@ with tab1:
     fig.update_traces(line_width=2)
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown('<div class="insight-box">💡 <b>Insight:</b> Sudan consistently records the '
-                'highest temperatures across the study period, with mean T2M regularly exceeding '
-                '30°C. Ethiopia shows a mid-range profile with a visible upward trend post-2020, '
-                'consistent with WMO-documented East Africa warming patterns.</div>',
+    st.markdown('<div class="insight-box"><b>Insight:</b> Use the sidebar variable selector '
+                'to compare temperature, precipitation, humidity, and wind patterns across '
+                'the selected countries and year range.</div>',
                 unsafe_allow_html=True)
 
     # Annual mean temperature table
-    st.markdown('<p class="section-header">Annual Temperature Summary</p>',
+    st.markdown('<p class="section-header">Annual Variable Summary</p>',
                 unsafe_allow_html=True)
-    temp_table = (df.groupby(['Country', 'Year'])['T2M']
+    temp_table = (df.groupby(['Country', 'Year'])[selected_var]
                     .mean().round(2)
                     .reset_index()
-                    .pivot(index='Year', columns='Country', values='T2M'))
+                    .pivot(index='Year', columns='Country', values=selected_var))
     st.dataframe(temp_table.style.background_gradient(cmap='RdYlBu_r', axis=None),
                  use_container_width=True)
 
@@ -325,12 +383,7 @@ with tab3:
     # Year-by-year heat days line chart
     st.markdown('<p class="section-header">Extreme Heat Days Over Time</p>',
                 unsafe_allow_html=True)
-    heat_all = extreme_heat_days(df_all)
-    heat_filtered = heat_all[
-        (heat_all['Country'].isin(selected_countries)) &
-        (heat_all['Year'] >= year_range[0]) &
-        (heat_all['Year'] <= year_range[1])
-    ]
+    heat_filtered = extreme_heat_days(df)
     fig_heat_line = px.line(
         heat_filtered, x='Year', y='Extreme_Heat_Days',
         color='Country', color_discrete_map=COLORS,
@@ -403,7 +456,7 @@ with tab5:
     st.markdown('<p class="section-header">Climate Vulnerability Ranking</p>',
                 unsafe_allow_html=True)
 
-    vuln = vulnerability_summary(df_all)
+    vuln = vulnerability_summary(df)
 
     # Ranking bar chart
     fig_vuln = px.bar(
@@ -439,27 +492,23 @@ with tab5:
     # COP32 Insights
     st.markdown('<p class="section-header">COP32 Policy Insights</p>',
                 unsafe_allow_html=True)
+    top_vuln = vuln.sort_values('Rank').iloc[0]
+    most_heat = vuln.sort_values('Total_Heat_Days', ascending=False).iloc[0]
+    most_variable_precip = vuln.sort_values('Precip_Std', ascending=False).iloc[0]
     insights = [
-        ("🌡️ Fastest Warming",
-         "Sudan shows the steepest temperature profile. Sustained warming threatens "
-         "agricultural viability across the Sahel and demands urgent emissions "
-         "accountability from major polluters."),
-        ("🌧️ Most Unstable Precipitation",
-         "Nigeria and Tanzania exhibit the highest precipitation standard deviation, "
-         "reflecting extreme swings between flood and drought years that directly "
-         "undermine food security."),
-        ("☀️ Heat & Drought Stress",
-         "Sudan records the most extreme heat days combined with the longest dry "
-         "streaks — compounding climate stress that degrades livelihoods and forces "
-         "displacement, creating the strongest case for loss-and-damage compensation."),
-        ("🇪🇹 Ethiopia's Climate Profile",
-         "Ethiopia sits in a mid-range vulnerability position, yet its exposure to "
-         "erratic rainfall directly threatens the Blue Nile basin and the livelihoods "
-         "of 85% of its population dependent on rain-fed agriculture."),
-        ("💰 Priority Finance Case",
-         "The data strongly supports championing Sudan for priority climate finance at "
-         "COP32. Its combination of extreme heat, prolonged drought, and lowest "
-         "precipitation makes it the most urgent case on the continent."),
+        ("Composite Risk",
+         f"{top_vuln['Country']} ranks highest under the current composite score, "
+         "which combines higher mean temperature, precipitation variability, and "
+         "total extreme heat days."),
+        ("Precipitation Instability",
+         f"{most_variable_precip['Country']} has the highest precipitation standard "
+         "deviation in the selected data, indicating stronger swings in daily rainfall."),
+        ("Extreme Heat Exposure",
+         f"{most_heat['Country']} records the most total days above 35°C in the "
+         "selected data."),
+        ("Filter-Aware Interpretation",
+         "These rankings update with the country and year filters, so policy claims "
+         "should be quoted together with the selected period and countries."),
     ]
     for title, text in insights:
         st.markdown(
